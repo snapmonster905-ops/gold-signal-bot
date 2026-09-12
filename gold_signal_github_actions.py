@@ -51,6 +51,14 @@ def fetch_candles(instrument, timeframe, count=150):
     resp.raise_for_status()
     candles = resp.json()["result"]["data"]
     candles.sort(key=lambda c: c["t"])
+    # Crypto.com's API returns price/volume fields as strings (e.g. "4434.40").
+    # Convert them to floats here so all downstream math works correctly.
+    for c in candles:
+        c["o"] = float(c["o"])
+        c["h"] = float(c["h"])
+        c["l"] = float(c["l"])
+        c["c"] = float(c["c"])
+        c["v"] = float(c["v"])
     return candles
 
 
