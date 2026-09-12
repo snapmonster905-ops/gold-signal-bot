@@ -1,32 +1,22 @@
 """
 AI-Style Gold (XAU/USD) Buy/Sell Signal Bot — GitHub Actions Version (Interactive)
 ====================================================================================
-This version runs on a SCHEDULE (every 15 minutes via GitHub Actions) and does TWO things
-each time it runs:
+Runs on a SCHEDULE (every 15 minutes via GitHub Actions). Each run does THREE things:
 
-1. AUTOMATIC ALERTS: Checks the 6-layer framework (EMA, MACD, RSI, VWAP, ADX, session
-   timing). If all conditions line up for a high-confidence BUY or SELL, it sends you
-   a Telegram alert automatically - no action needed from you.
+1. WELCOME MESSAGE: If you send the bot "/start", it replies with a nice welcome
+   message explaining what it does.
 
-2. ON-DEMAND REPLIES: Checks if you've sent the bot any new message since the last run
-   (e.g. "/start", "target", "status"). If so, it immediately replies with the CURRENT
-   market status and target levels - even if it's not a high-confidence signal - so you
-   always get an answer within ~15 minutes of asking.
+2. ON-DEMAND STATUS: If you send any message containing "target", "status",
+   "signal", "price", or "gold", it replies with the CURRENT market status and
+   target levels - even if it's not a high-confidence auto-alert.
 
-Because this only runs on a schedule (not a constantly-listening server), replies are
-not instant - expect up to a 15-minute delay (matching how often GitHub Actions runs
-this). This keeps everything at ZERO cost - no server, no VPS, no card needed anywhere.
+3. AUTOMATIC ALERTS: Checks the 6-layer framework (EMA, MACD, RSI, VWAP, ADX,
+   session timing). If all conditions line up for a high-confidence BUY or SELL,
+   it sends you a Telegram alert automatically.
 
-Uses the 6-Layer Framework:
-  1. EMA-50        -> Trend direction
-  2. MACD          -> Momentum
-  3. RSI (14)      -> Overbought/Oversold
-  4. VWAP          -> Intraday fair value / bias
-  5. ADX (14)      -> Trend strength (only auto-alert when ADX >= 25)
-  6. Session time  -> Only auto-alert during London/NY overlap hours
-
-State (last signal sent + last processed Telegram message) is stored in a small
-JSON file that GitHub Actions commits back to the repo after each run.
+Because this only runs on a schedule (not a constantly-listening server), replies
+are not instant - expect up to a 15-minute delay. This keeps everything at ZERO
+cost - no server, no VPS, no card needed anywhere.
 
 Data source: Crypto.com Exchange public market-data API (free, no key needed).
 """
@@ -50,9 +40,7 @@ ADX_PERIOD = 14
 ADX_MIN_THRESHOLD = 25
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 
-# Any incoming message containing one of these words (case-insensitive) triggers
-# an on-demand "current status" reply.
-TRIGGER_WORDS = ["start", "target", "status", "signal", "price", "gold"]
+STATUS_TRIGGER_WORDS = ["target", "status", "signal", "price", "gold"]
 
 CANDLESTICK_URL = "https://api.crypto.com/exchange/v1/public/get-candlestick"
 TELEGRAM_SEND_URL = "https://api.telegram.org/bot{token}/sendMessage"
@@ -69,8 +57,6 @@ def fetch_candles(instrument, timeframe, count=150):
     resp.raise_for_status()
     candles = resp.json()["result"]["data"]
     candles.sort(key=lambda c: c["t"])
-    # Crypto.com's API returns price/volume fields as strings (e.g. "4434.40").
-    # Convert them to floats here so all downstream math works correctly.
     for c in candles:
         c["o"] = float(c["o"])
         c["h"] = float(c["h"])
@@ -145,8 +131,6 @@ def atr(candles, period=14):
 
 
 def calculate_adx(candles, period=14):
-    """Wilder's ADX - measures trend STRENGTH (not direction).
-    ADX >= 25 = strong/tradeable trend. Below 20 = choppy, skip trading."""
     highs = [c["h"] for c in candles]
     lows = [c["l"] for c in candles]
     closes = [c["c"] for c in candles]
@@ -195,8 +179,6 @@ def calculate_adx(candles, period=14):
 
 
 def in_trading_session():
-    """Only auto-alert during London / London-NY overlap sessions
-    (12:30 PM - 9:30 PM IST = 07:00 - 16:00 UTC)."""
     utc_hour = datetime.utcnow().hour
     return 7 <= utc_hour < 16
 
@@ -281,29 +263,63 @@ def send_telegram_message(text):
         print("[SENT] Telegram message delivered.")
 
 
-def get_new_updates(last_update_id):
-    """Fetch any new messages sent to the bot since last_update_id."""
+def get_new_messages(last_update_id):
+    """Fetch any new messages sent to the bot since last_update_id.
+    Returns (wants_welcome, wants_status, new_last_update_id)."""
     url = TELEGRAM_GET_UPDATES_URL.format(token=BOT_TOKEN)
-    params = {"offset": last_update_id + 1, "timeout": 0} if last_update_id else {"timeout": 0}
+    params = {"timeout": 0}
+    if last_update_id:
+        params["offset"] = last_update_id + 1
     r = requests.get(url, params=params, timeout=15)
     if r.status_code != 200:
         print(f"[ERROR] getUpdates failed: {r.text}")
-        return [], last_update_id
+        return False, False, last_update_id
+
     updates = r.json().get("result", [])
+    print(f"[DEBUG] getUpdates returned {len(updates)} update(s).")
+
     new_max_id = last_update_id
-    triggered = False
+    wants_welcome = False
+    wants_status = False
+
     for u in updates:
         new_max_id = max(new_max_id, u["update_id"])
         msg = u.get("message", {})
-        text = msg.get("text", "").lower()
-        if any(word in text for word in TRIGGER_WORDS):
-            triggered = True
-    return triggered, new_max_id
+        text = msg.get("text", "")
+        print(f"[DEBUG] Message received: {text!r}")
+        text_lower = text.lower().strip()
+
+        if text_lower.startswith("/start"):
+            wants_welcome = True
+        elif any(word in text_lower for word in STATUS_TRIGGER_WORDS):
+            wants_status = True
+
+    return wants_welcome, wants_status, new_max_id
 
 
 # ============================================================
 # MESSAGE FORMATTING
 # ============================================================
+
+def format_welcome_message():
+    return (
+        "👋 *Welcome to your Gold (XAU/USD) Signal Bot!*\n\n"
+        "Here's what I do for you:\n\n"
+        "🔔 *Automatic Alerts* — I check the market every 15 minutes using a "
+        "6-layer technical framework (EMA, MACD, RSI, VWAP, ADX trend strength, "
+        "and trading session timing). When all signals line up for a high-confidence "
+        "setup, I'll message you here automatically with Entry, Stop-loss, and "
+        "Target levels.\n\n"
+        "💬 *On-Demand Status* — Send me a message anytime with words like "
+        "*target*, *status*, *price*, *signal*, or *gold*, and within ~15 minutes "
+        "I'll reply with the current market snapshot and levels, even if there's no "
+        "high-confidence alert active.\n\n"
+        "⚠️ *Important:* I'm a technical analysis tool, not financial advice. "
+        "Always use your own risk management — position sizing, stop-losses, and "
+        "never risk more than you can afford to lose.\n\n"
+        "You're all set! I'll be watching the market for you. 📊"
+    )
+
 
 def format_alert(a):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -339,14 +355,12 @@ def format_alert(a):
 
 
 def format_status_reply(a):
-    """Reply sent when user messages the bot asking for status/target,
-    even if there's no high-confidence auto-alert signal right now."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     bias = "Bullish" if a["bullish_votes"] > a["bearish_votes"] else "Bearish" if a["bearish_votes"] > a["bullish_votes"] else "Mixed"
 
     lines = [
-        f"📊 *GOLD (XAU/USD) - Current Status*",
-        f"",
+        "📊 *GOLD (XAU/USD) - Current Status*",
+        "",
         f"Price: ${a['price']:,.2f}",
         f"Bias: {bias} ({a['bullish_votes']}/4 bullish, {a['bearish_votes']}/4 bearish)",
         f"RSI(14): {a['rsi']:.1f}",
@@ -355,18 +369,18 @@ def format_status_reply(a):
         f"VWAP: ${a['vwap']:,.2f}",
         f"ADX(14): {a['adx']:.1f} ({'strong trend' if a['adx'] >= ADX_MIN_THRESHOLD else 'weak/choppy trend'})",
         f"ATR(14): ${a['atr']:.2f}",
-        f"",
+        "",
     ]
 
     if a["signal"] in ("BUY", "SELL"):
-        lines.append(f"✅ High-confidence {a['signal']} signal is currently active - check the alert above/below for entry details.")
+        lines.append(f"✅ High-confidence {a['signal']} signal is currently active - check the alert message for entry details.")
     else:
         atr_v = a["atr"]
         if bias == "Bullish":
-            lines.append(f"⚠️ No high-confidence auto-alert yet (needs ADX≥25 and 4/4 agreement), but bias leans bullish.")
+            lines.append("⚠️ No high-confidence auto-alert yet (needs ADX≥25 and 4/4 agreement), but bias leans bullish.")
             lines.append(f"If considering a long: Entry ~${a['price']:,.2f} | SL ${a['price'] - 1.5*atr_v:,.2f} | T1 ${a['price'] + 1.5*atr_v:,.2f}")
         elif bias == "Bearish":
-            lines.append(f"⚠️ No high-confidence auto-alert yet (needs ADX≥25 and 4/4 agreement), but bias leans bearish.")
+            lines.append("⚠️ No high-confidence auto-alert yet (needs ADX≥25 and 4/4 agreement), but bias leans bearish.")
             lines.append(f"If considering a short: Entry ~${a['price']:,.2f} | SL ${a['price'] + 1.5*atr_v:,.2f} | T1 ${a['price'] - 1.5*atr_v:,.2f}")
         else:
             lines.append("⚠️ Indicators are mixed right now - no clear direction. Best to wait for a cleaner setup.")
@@ -378,7 +392,7 @@ def format_status_reply(a):
 
 
 # ============================================================
-# STATE (persisted across runs via GitHub Actions commit)
+# STATE
 # ============================================================
 
 def read_state():
@@ -409,9 +423,12 @@ def main():
     last_signal = state.get("last_signal")
     last_update_id = state.get("last_update_id", 0)
 
-    # Check for any new user messages (e.g. "/start", "target") since last run
-    user_asked, new_update_id = get_new_updates(last_update_id)
+    wants_welcome, wants_status, new_update_id = get_new_messages(last_update_id)
     state["last_update_id"] = new_update_id
+    print(f"[DEBUG] wants_welcome={wants_welcome} wants_status={wants_status} new_update_id={new_update_id}")
+
+    if wants_welcome:
+        send_telegram_message(format_welcome_message())
 
     candles = fetch_candles(INSTRUMENT, TIMEFRAME, count=150)
     result = analyze(candles)
@@ -424,13 +441,11 @@ def main():
     print(
         f"Price: {result['price']:.2f} | Signal: {result['signal']} | "
         f"Bull:{result['bullish_votes']} Bear:{result['bearish_votes']} | "
-        f"ADX:{result['adx']:.1f} | Session_OK:{result['good_session']} | "
-        f"UserAsked:{user_asked}"
+        f"ADX:{result['adx']:.1f} | Session_OK:{result['good_session']}"
     )
     if result.get("skip_reason"):
         print(f"[FILTERED] {result['skip_reason']}")
 
-    # 1. Automatic high-confidence alert (only on signal CHANGE)
     if result["signal"] in ("BUY", "SELL") and result["signal"] != last_signal:
         send_telegram_message(format_alert(result))
         state["last_signal"] = result["signal"]
@@ -439,10 +454,9 @@ def main():
     else:
         print("Same signal as last time, no auto-alert sent.")
 
-    # 2. On-demand reply if the user messaged the bot since the last run
-    if user_asked:
+    if wants_status:
         send_telegram_message(format_status_reply(result))
-        print("[SENT] On-demand status reply (user asked).")
+        print("[SENT] On-demand status reply.")
 
     write_state(state)
 
